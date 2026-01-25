@@ -13,6 +13,14 @@
 
 set -e
 
+# Auto-source .env from script directory or fallback
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  source "$SCRIPT_DIR/.env"
+elif [ -f "$HOME/.mik-workflow.env" ]; then
+  source "$HOME/.mik-workflow.env"
+fi
+
 SESSION_NAME="$1"
 if [ -z "$SESSION_NAME" ]; then
   echo "Usage: close-session <session-name>"

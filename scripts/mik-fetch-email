@@ -47,6 +47,36 @@ except ImportError:
     HAS_HTML2TEXT = False
 
 
+def load_dotenv():
+    """Load .env file from repo directory or home fallback."""
+    script_dir = Path(__file__).parent
+    repo_dir = script_dir.parent
+
+    env_paths = [
+        repo_dir / '.env',
+        Path.home() / '.mik-workflow.env',
+    ]
+
+    for env_path in env_paths:
+        if env_path.exists():
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, _, value = line.partition('=')
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        # Expand $HOME
+                        value = value.replace('$HOME', str(Path.home()))
+                        if key not in os.environ:  # Don't override existing
+                            os.environ[key] = value
+            break
+
+
+# Load environment variables from .env
+load_dotenv()
+
+
 def get_config():
     """Get configuration from environment or defaults."""
     script_dir = Path(__file__).parent

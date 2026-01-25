@@ -15,6 +15,14 @@ set -e
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Auto-source .env from repo directory or fallback
+if [ -f "$REPO_DIR/.env" ]; then
+  source "$REPO_DIR/.env"
+elif [ -f "$HOME/.mik-workflow.env" ]; then
+  source "$HOME/.mik-workflow.env"
+fi
 
 # CORPUS_PATH is required - set in .env or environment
 CORPUS_PATH="${CORPUS_PATH:?CORPUS_PATH environment variable required}"
