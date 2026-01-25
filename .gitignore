@@ -17,5 +17,4 @@ __pycache__/
 # Test outputs (keep inputs, ignore generated results)
 tests/vision-api/results/
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local overrides (settings.local.json is tracked as default)

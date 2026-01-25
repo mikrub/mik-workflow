@@ -4,12 +4,10 @@
 # Usage: close-session <session-name>
 #
 # This:
-# 1. Goes to main repo
+# 1. Detects the repo from the session's worktree
 # 2. Merges feature/<session-name> into main
 # 3. Pushes to remote
 # 4. Cleans up the ccswitch worktree
-#
-# Requires: MAIN_REPO environment variable (path to main content repo)
 
 set -e
 
@@ -40,16 +38,36 @@ if [ -z "$SESSION_NAME" ]; then
   exit 1
 fi
 
-# Require MAIN_REPO env var
-MAIN_REPO="${MAIN_REPO:?MAIN_REPO environment variable required (path to main content repo)}"
+# Find the worktree for this session
+WORKTREE_PATH=""
+if [ -d "$HOME/.ccswitch/worktrees" ]; then
+  WORKTREE_PATH=$(find "$HOME/.ccswitch/worktrees" -mindepth 2 -maxdepth 2 -type d -name "$SESSION_NAME" 2>/dev/null | head -1)
+fi
+
+if [ -z "$WORKTREE_PATH" ] || [ ! -d "$WORKTREE_PATH" ]; then
+  echo "Error: No worktree found for session '$SESSION_NAME'"
+  echo ""
+  echo "Active sessions:"
+  find "$HOME/.ccswitch/worktrees" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | while read -r path; do
+    repo=$(basename "$(dirname "$path")")
+    session=$(basename "$path")
+    echo "  $session ($repo)"
+  done
+  exit 1
+fi
+
+# Get the main repo path from git worktree list (first entry is always main)
+MAIN_REPO=$(git -C "$WORKTREE_PATH" worktree list --porcelain | head -1 | sed 's/worktree //')
 BRANCH_NAME="feature/$SESSION_NAME"
 
 echo "Closing session: $SESSION_NAME"
+echo "  Worktree: $WORKTREE_PATH"
+echo "  Main repo: $MAIN_REPO"
 echo ""
 
 # Check if branch exists
 if ! git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-  echo "Error: Branch $BRANCH_NAME does not exist"
+  echo "Error: Branch $BRANCH_NAME does not exist in $MAIN_REPO"
   exit 1
 fi
 
