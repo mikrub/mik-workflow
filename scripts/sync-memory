@@ -7,6 +7,7 @@
 #
 # Usage:
 #   sync-memory           # Bidirectional sync
+#   sync-memory --resync  # First run or reset baseline
 #   sync-memory --check   # Verify sync status without transferring
 #
 # Requires: Basic-Memory cloud account (basicmemory.com)
@@ -14,7 +15,7 @@
 
 set -euo pipefail
 
-BM="uvx basic-memory@0.15.0"
+BM="uvx basic-memory"
 LOGGED_IN=false
 
 cleanup() {
@@ -24,16 +25,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+PROJECT="mikrub-corpus"
+BISYNC_STATE="$HOME/.basic-memory/bisync-state/$PROJECT"
+
 if [[ "${1:-}" == "--check" ]]; then
     echo "Checking sync status..."
     $BM cloud login
     LOGGED_IN=true
-    $BM cloud check
+    $BM project check --name "$PROJECT"
     exit 0
 fi
 
 echo "Syncing to Basic-Memory cloud..."
 $BM cloud login
 LOGGED_IN=true
-$BM cloud bisync
+
+# First run needs --resync to establish baseline
+if [[ "${1:-}" == "--resync" ]] || [[ ! -d "$BISYNC_STATE" ]]; then
+    echo "Establishing sync baseline (first run or resync requested)..."
+    $BM project bisync --name "$PROJECT" --resync
+else
+    $BM project bisync --name "$PROJECT"
+fi
 echo "Done."
