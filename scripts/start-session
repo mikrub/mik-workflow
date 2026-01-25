@@ -56,7 +56,7 @@ if [ -n "$STATE_REPO" ] && [ -d "$STATE_REPO/.git" ]; then
 fi
 
 echo ""
-echo "Starting Claude Code in worktree...
+echo "Starting Claude Code in worktree..."
 echo "When you exit claude, run: close-session $SESSION_NAME"
 echo ""
 
