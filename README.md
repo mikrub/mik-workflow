@@ -1,12 +1,11 @@
 # mik-workflow
 
-Personal knowledge workflow tools for Claude Code: session management, corpus ingestion, and procedural skills.
+Personal knowledge workflow tools: session management, corpus ingestion, and Claude Code skills.
 
-## What This Is
-
-A collection of scripts and Claude Code skills for managing a personal knowledge corpus. Designed to work alongside a separate content repository (your blog, notes, research).
-
-**This repo contains the tools. Your content lives elsewhere.**
+Part of a three-repo system:
+- **mik-workflow** (this repo) — Scripts and skills
+- **mik-workflow-state** — Session state (HANDOVER.md, project-log.md)
+- **mikrub.com** — Content repo (Hugo site + corpus)
 
 ## Quick Start
 
@@ -19,8 +18,8 @@ cd mik-workflow
 cp .env.example .env
 # Edit .env with your paths
 
-# 3. Add to PATH (or symlink scripts to ~/bin/)
-echo 'export PATH="$PATH:~/path/to/mik-workflow/scripts"' >> ~/.zshrc
+# 3. Add scripts to PATH
+echo 'export PATH="$PATH:~/Dropbox/repos/mik-workflow/scripts"' >> ~/.zshrc
 source ~/.zshrc
 
 # 4. Start a session
@@ -31,8 +30,8 @@ start-session my-feature
 
 | Script | Purpose |
 |--------|---------|
-| `start-session` | Create git worktree for isolated Claude Code session |
-| `close-session` | Merge worktree branch and cleanup |
+| `start-session` | Create git worktree + state branch |
+| `close-session` | Merge both repos and cleanup |
 | `sync-memory` | Sync corpus to Basic-Memory cloud |
 | `mik-fetch-email` | Fetch emails from Gmail to corpus inbox |
 | `mik-ingest` | Process inbox files → markdown with frontmatter |
@@ -43,12 +42,15 @@ start-session my-feature
 
 Claude Code skills (procedural workflows invoked with `/command`):
 
-- `/update-project-log` — Append session decisions to permanent log
-- `/archive-transcript` — Save conversation to corpus
-- `/agent-handover` — Update handover state for next session
-- `/ingest` — Process files with proper frontmatter
-- `/session-capture` — Route documentation to appropriate files
-- `/resolve-merge` — Resolve merge conflicts semantically
+| Skill | Purpose |
+|-------|---------|
+| `/update-project-log` | Append session decisions to project log |
+| `/archive-transcript` | Save conversation to corpus |
+| `/agent-handover` | Update HANDOVER.md for next session |
+| `/ingest` | Process files with proper frontmatter |
+| `/session-capture` | Route documentation to appropriate files |
+| `/update-draft` | Incorporate research into article drafts |
+| `/resolve-merge` | Resolve merge conflicts semantically |
 
 ## Environment Variables
 
@@ -56,20 +58,15 @@ Create `.env` from `.env.example`:
 
 ```bash
 # Required
-CORPUS_PATH="$HOME/repos/mysite/corpus"
-MAIN_REPO="$HOME/repos/mysite"
+CORPUS_PATH="$HOME/Dropbox/repos/mikrub.com/corpus"
+MAIN_REPO="$HOME/Dropbox/repos/mikrub.com"
+STATE_REPO="$HOME/Dropbox/repos/mik-workflow-state"
 
-# Optional (for specific scripts)
+# Optional
 GMAIL_USER="your@gmail.com"
 GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
 GEMINI_API_KEY="your-key"
 ```
-
-## Dependencies
-
-- **[ccswitch](https://github.com/ksred/ccswitch)** — Git worktree session management
-- **[MinerU](https://github.com/opendatalab/MinerU)** — PDF/image extraction (optional, for mik-ingest)
-- **[Basic-Memory](https://github.com/basicmachines-co/basic-memory)** — Semantic search (optional)
 
 ## Session Workflow
 
@@ -110,6 +107,12 @@ Email/PDF/Image
          ▼
     corpus/sources/
 ```
+
+## Dependencies
+
+- **[ccswitch](https://github.com/ksred/ccswitch)** — Git worktree session management
+- **[MinerU](https://github.com/opendatalab/MinerU)** — PDF/image extraction (optional)
+- **[Basic-Memory](https://github.com/basicmachines-co/basic-memory)** — Semantic search (optional)
 
 ## License
 

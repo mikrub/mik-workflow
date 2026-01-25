@@ -4,107 +4,79 @@ Project instructions for Claude Code when working in this repository.
 
 ## Project Overview
 
-Personal knowledge workflow tools: session management, corpus ingestion, and Claude Code skills. Designed to work alongside a separate corpus/content repository.
+Session management, corpus ingestion, and Claude Code skills. This is the **tools repo** of a three-repo system:
+
+- `mik-workflow/` — **This repo.** Scripts and skills
+- `mik-workflow-state/` — Session state (HANDOVER.md, project-log.md)
+- `mikrub.com/` — Content repo (Hugo site + corpus)
 
 ## Repository Structure
 
 ```
 mik-workflow/
-├── scripts/           # CLI tools (symlink to ~/bin/ or add to PATH)
-│   ├── start-session  # Create worktree session
-│   ├── close-session  # Merge and cleanup session
-│   ├── sync-memory    # Sync corpus to Basic-Memory cloud
+├── scripts/           # CLI tools (symlink to ~/bin/)
+│   ├── start-session  # Create worktree + state branch
+│   ├── close-session  # Merge repos and cleanup
+│   ├── sync-memory    # Basic-Memory cloud sync
 │   ├── mik-ingest     # Process inbox → sources
-│   ├── mik-fetch-email    # Fetch from Gmail
-│   ├── mik-describe-images # Add Vision API descriptions
-│   └── mik-vision-report   # Generate test reports
-├── skills/            # Claude Code skills (procedural workflows)
+│   ├── mik-fetch-email
+│   ├── mik-describe-images
+│   └── mik-vision-report
+├── skills/            # Claude Code skills (/slash commands)
 ├── tests/             # Vision API test suite
 ├── .env.example       # Environment template
 └── docker-compose.yml # Basic-Memory SSE server
 ```
 
-## Setup
-
-1. Clone this repo
-2. Copy `.env.example` to `.env` and fill in values
-3. Either:
-   - Add `scripts/` to PATH: `export PATH="$PATH:/path/to/mik-workflow/scripts"`
-   - Or symlink individual scripts to `~/bin/`
-4. Configure skills in your corpus repo's `.claude/skills/` directory
-
 ## Environment Variables
 
-Scripts source from `.env` in repo root. Required variables:
+Scripts source from `.env` in repo root:
 
-- `CORPUS_PATH` — Path to corpus directory (e.g., `~/repos/mysite/corpus`)
-- `MAIN_REPO` — Path to main content repo (for close-session)
-- `STATE_REPO` — Path to session state repo (for HANDOVER.md, project-log.md)
+```bash
+# Required
+CORPUS_PATH="$HOME/Dropbox/repos/mikrub.com/corpus"
+MAIN_REPO="$HOME/Dropbox/repos/mikrub.com"
+STATE_REPO="$HOME/Dropbox/repos/mik-workflow-state"
 
-Optional:
-- `GMAIL_USER`, `GMAIL_APP_PASSWORD` — For mik-fetch-email
-- `GEMINI_API_KEY` — For mik-describe-images
-
-## Session State Repo
-
-Session state (HANDOVER.md, project-log.md) lives in a separate private git repo configured via `STATE_REPO`. This enables:
-- **Branch-based merge protection** — Each session gets its own branch; git handles conflicts
-- **Privacy** — State files not in public mik-workflow repo
-- **Backup** — Private GitHub repo for cloud sync
-
-The state repo is automatically managed by `start-session` (creates branch) and `close-session` (merges and pushes).
+# Optional
+GMAIL_USER, GMAIL_APP_PASSWORD  # For mik-fetch-email
+GEMINI_API_KEY                   # For mik-describe-images
+```
 
 ## Session Workflow
 
 ```bash
-# Start new session (creates worktree)
-start-session my-feature
+# Start (terminal)
+start-session my-feature    # Creates worktree + state branch
 
 # Work in Claude Code...
+# End of session skills:
+/update-project-log         # Appends to $STATE_REPO/project-log.md
+/archive-transcript         # Saves to mikrub.com/corpus/transcripts/
+/agent-handover             # Updates $STATE_REPO/HANDOVER.md
 
-# End session (in Claude Code)
-/update-project-log
-/archive-transcript
-/agent-handover
+# Commit and close (terminal)
 git add -A && git commit -m "session: description"
-
-# Merge and cleanup (in terminal)
-close-session my-feature
+close-session my-feature    # Merges both repos, cleanup
 ```
 
 ## Skills
 
-Skills are procedural workflows for Claude Code. They're invoked with `/skill-name` in the chat.
+Skills are procedural workflows invoked with `/skill-name`:
 
-Available skills:
-- `/update-project-log` — Append session decisions to project log
-- `/archive-transcript` — Save conversation to corpus
-- `/agent-handover` — Update HANDOVER.md for next session
-- `/ingest` — Process files from inbox to sources
-- `/session-capture` — Route documentation to appropriate files
-- `/update-draft` — Incorporate research into article drafts
-- `/resolve-merge` — Resolve git merge conflicts semantically
-
-To use these skills in your corpus repo, symlink them:
-```bash
-mkdir -p .claude/skills/update-project-log
-ln -s /path/to/mik-workflow/skills/update-project-log.md .claude/skills/update-project-log/SKILL.md
-```
-
-## Script Categories
-
-**System scripts** (standalone, manual):
-- `start-session` / `close-session` — Session lifecycle
-- `sync-memory` — Basic-Memory cloud sync
-
-**Pipeline scripts** (sequential workflow):
-```
-mik-fetch-email → mik-ingest → mik-describe-images
-```
+| Skill | Purpose |
+|-------|---------|
+| `/update-project-log` | Append session decisions to project log |
+| `/archive-transcript` | Save conversation to corpus |
+| `/agent-handover` | Update HANDOVER.md for next session |
+| `/ingest` | Process files from inbox to sources |
+| `/session-capture` | Route documentation to appropriate files |
+| `/update-draft` | Incorporate research into article drafts |
+| `/resolve-merge` | Resolve git merge conflicts semantically |
 
 ## Dependencies
 
 - [ccswitch](https://github.com/ksred/ccswitch) — Git worktree session management
-- [MinerU](https://github.com/opendatalab/MinerU) — PDF/image → markdown (for mik-ingest)
+- [MinerU](https://github.com/opendatalab/MinerU) — PDF/image → markdown
 - [Basic-Memory](https://github.com/basicmachines-co/basic-memory) — Semantic search MCP
-- Gemini API — For Vision descriptions (optional)
+- Gemini API — Vision descriptions (optional)
