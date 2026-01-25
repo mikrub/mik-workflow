@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""
+mik-describe-images: Add AI descriptions to images in markdown files.
+
+Usage: mik-describe-images <markdown_file> [options]
+
+Finds image references in markdown, sends images to Gemini Flash,
+and appends descriptions below each image.
+
+Requires: GEMINI_API_KEY environment variable
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+from datetime import date
+from pathlib import Path
+
+# Usage tracker location
+USAGE_FILE = Path.home() / ".mik-usage.json"
+
+# Limits
+DAILY_LIMIT = 100
+DAILY_WARN = 80
+MONTHLY_LIMIT = 500
+MONTHLY_WARN = 400
+
+# Rate limiting (free tier: 5 req/min for gemini-2.5-flash)
+REQUEST_DELAY = 12  # seconds between requests (5 per minute = 12s each)
+MAX_RETRIES = 3
+RETRY_DELAY = 30  # initial retry delay for 429 errors
+
+# Image size thresholds (keep in sync with mik-fetch-email INLINE_IMAGE_THRESHOLD)
+MIN_IMAGE_SIZE = 10 * 1024      # 10KB - skip tiny images (icons, bullets, signatures)
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB - warn on huge images
+WARN_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB - warn threshold
+
+# Prompt - optimized for semantic search / vector retrieval
+PROMPT = """Analyze this image thoroughly for someone who cannot see it.
+
+1. **Overview**: What type of image is this? (photo, diagram, chart, screenshot, etc.)
+
+2. **Content**: Describe everything visible:
+   - All text, labels, and annotations (transcribe exactly)
+   - Visual elements (shapes, colors, icons, arrows, connections)
+   - For diagrams/flowcharts: describe the structure and relationships
+   - For charts: describe axes, data points, trends
+
+3. **Structure** (for diagrams/flowcharts only):
+   If this is a diagram, flowchart, or architectural diagram, provide a text representation.
+   Use indentation and ASCII art where helpful:
+   ```
+   [Box A] --arrow--> [Box B]
+              |
+              v
+           [Box C]
+   ```
+   Or describe the hierarchy/flow in structured text.
+
+4. **Key Takeaway**: What is the main point or purpose of this image?
+
+Be thorough - this description will be indexed for semantic search and must capture all searchable content."""
+
+
+def load_usage() -> dict:
+    """Load usage data from file."""
+    if USAGE_FILE.exists():
+        with open(USAGE_FILE) as f:
+            return json.load(f)
+    return {"daily": {}, "monthly": {}, "hashes": {}}
+
+
+def save_usage(data: dict) -> None:
+    """Save usage data to file."""
+    with open(USAGE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_image_hash(img_path: Path) -> str:
+    """Get SHA256 hash of image file."""
+    return hashlib.sha256(img_path.read_bytes()).hexdigest()[:16]
+
+
+def is_hash_processed(img_hash: str) -> bool:
+    """Check if this image hash was already processed."""
+    usage = load_usage()
+    return img_hash in usage.get("hashes", {})
+
+
+def record_hash(img_hash: str, description: str) -> None:
+    """Record that this hash was processed (store truncated description for reference)."""
+    usage = load_usage()
+    if "hashes" not in usage:
+        usage["hashes"] = {}
+    # Store first 100 chars of description for debugging
+    usage["hashes"][img_hash] = description[:100] + "..." if len(description) > 100 else description
+    save_usage(usage)
+
+
+def check_usage(count: int) -> tuple[bool, str]:
+    """Check if we can process `count` images. Returns (ok, message)."""
+    usage = load_usage()
+    today = date.today().isoformat()
+    month = date.today().strftime("%Y-%m")
+
+    daily_used = usage.get("daily", {}).get(today, 0)
+    monthly_used = usage.get("monthly", {}).get(month, 0)
+
+    # Check limits
+    if daily_used + count > DAILY_LIMIT:
+        return False, f"Daily limit exceeded ({daily_used}/{DAILY_LIMIT} used, need {count})"
+    if monthly_used + count > MONTHLY_LIMIT:
+        return False, f"Monthly limit exceeded ({monthly_used}/{MONTHLY_LIMIT} used, need {count})"
+
+    # Warnings
+    warnings = []
+    if daily_used + count > DAILY_WARN:
+        warnings.append(f"Daily usage high: {daily_used + count}/{DAILY_LIMIT}")
+    if monthly_used + count > MONTHLY_WARN:
+        warnings.append(f"Monthly usage high: {monthly_used + count}/{MONTHLY_LIMIT}")
+
+    msg = "; ".join(warnings) if warnings else f"Usage OK (daily: {daily_used}, monthly: {monthly_used})"
+    return True, msg
+
+
+def record_usage(count: int) -> None:
+    """Record that we processed `count` images."""
+    usage = load_usage()
+    today = date.today().isoformat()
+    month = date.today().strftime("%Y-%m")
+
+    if "daily" not in usage:
+        usage["daily"] = {}
+    if "monthly" not in usage:
+        usage["monthly"] = {}
+
+    usage["daily"][today] = usage["daily"].get(today, 0) + count
+    usage["monthly"][month] = usage["monthly"].get(month, 0) + count
+
+    save_usage(usage)
+
+
+def check_image_size(img_path: Path) -> tuple[bool, str | None]:
+    """Check if image size is acceptable. Returns (ok, warning_message)."""
+    size = img_path.stat().st_size
+
+    if size < MIN_IMAGE_SIZE:
+        return False, f"too small ({size} bytes, likely icon)"
+
+    if size > MAX_IMAGE_SIZE:
+        return False, f"too large ({size // 1024 // 1024}MB, max {MAX_IMAGE_SIZE // 1024 // 1024}MB)"
+
+    if size > WARN_IMAGE_SIZE:
+        return True, f"large image ({size // 1024 // 1024}MB)"
+
+    return True, None
+
+
+def has_description(md_content: str, match_text: str) -> bool:
+    """Check if this image already has a description (italic text after it)."""
+    # Look for pattern: ![](image.png)\n\n*description*
+    pattern = re.escape(match_text) + r'\n\n\*[^*]+\*'
+    return bool(re.search(pattern, md_content))
+
+
+def find_images(md_content: str, md_path: Path, retry_mode: bool = False) -> list[tuple[str, Path, str]]:
+    """Find image references in markdown. Returns [(match_text, image_path, hash), ...]."""
+    images = []
+    md_dir = md_path.parent
+
+    # Match ![alt](path) patterns
+    pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+    for match in re.finditer(pattern, md_content):
+        full_match = match.group(0)
+        img_path_str = match.group(2)
+
+        # Skip URLs
+        if img_path_str.startswith(('http://', 'https://')):
+            continue
+
+        # Resolve relative path
+        img_path = md_dir / img_path_str
+        if not img_path.exists():
+            print(f"  Warning: Image not found: {img_path}", file=sys.stderr)
+            continue
+
+        # In retry mode, skip images that already have descriptions
+        if retry_mode and has_description(md_content, full_match):
+            continue
+
+        # Check image size
+        ok, msg = check_image_size(img_path)
+        if not ok:
+            print(f"  Skipping {img_path.name}: {msg}")
+            continue
+        if msg:
+            print(f"  Warning: {img_path.name}: {msg}")
+
+        # Get hash for dedup
+        img_hash = get_image_hash(img_path)
+
+        images.append((full_match, img_path, img_hash))
+
+    return images
+
+
+def describe_image(img_path: Path, client) -> str:
+    """Send image to Gemini Flash and get description. Retries on rate limit."""
+    from google.genai import types
+
+    # Read image
+    img_bytes = img_path.read_bytes()
+
+    # Determine mime type
+    suffix = img_path.suffix.lower()
+    mime_map = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+    }
+    mime_type = mime_map.get(suffix, 'image/png')
+
+    # Retry loop for rate limits
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(data=img_bytes, mime_type=mime_type),
+                            types.Part.from_text(text=PROMPT),
+                        ],
+                    )
+                ],
+            )
+            return response.text.strip()
+
+        except Exception as e:
+            if "429" in str(e) and attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAY * (2 ** attempt)  # exponential backoff
+                print(f"rate limited, waiting {delay}s...", end=" ", flush=True)
+                time.sleep(delay)
+            else:
+                raise
+
+
+def process_markdown(md_path: Path, dry_run: bool = False, retry: bool = False,
+                     skip_cached: bool = True) -> int:
+    """Process a markdown file, adding descriptions to images. Returns count processed."""
+    from google import genai
+
+    # Check API key
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY environment variable not set", file=sys.stderr)
+        sys.exit(1)
+
+    # Read markdown
+    content = md_path.read_text()
+
+    # Find images
+    images = find_images(content, md_path, retry_mode=retry)
+    if not images:
+        if retry:
+            print("No images need descriptions (all already have them)")
+        else:
+            print("No images found in markdown file")
+        return 0
+
+    # Filter out already-processed hashes if skip_cached
+    if skip_cached:
+        original_count = len(images)
+        images = [(m, p, h) for m, p, h in images if not is_hash_processed(h)]
+        if len(images) < original_count:
+            print(f"Skipping {original_count - len(images)} cached image(s)")
+
+    if not images:
+        print("All images already processed (cached by hash)")
+        return 0
+
+    print(f"Found {len(images)} image(s) to process")
+
+    # Check usage limits
+    ok, msg = check_usage(len(images))
+    print(f"Usage check: {msg}")
+    if not ok:
+        print("Aborting due to usage limits", file=sys.stderr)
+        sys.exit(1)
+
+    if dry_run:
+        print("Dry run - would process these images:")
+        for match_text, img_path, img_hash in images:
+            size_kb = img_path.stat().st_size // 1024
+            print(f"  - {img_path.name} ({size_kb}KB, hash: {img_hash[:8]})")
+        return 0
+
+    # Initialize Gemini client
+    client = genai.Client(api_key=api_key)
+
+    # Process each image with rate limiting
+    processed = 0
+    for i, (match_text, img_path, img_hash) in enumerate(images):
+        size_kb = img_path.stat().st_size // 1024
+        print(f"  [{i+1}/{len(images)}] {img_path.name} ({size_kb}KB)...", end=" ", flush=True)
+
+        try:
+            description = describe_image(img_path, client)
+
+            # Record hash for dedup
+            record_hash(img_hash, description)
+
+            # Format as collapsible details block (preserves markdown formatting)
+            formatted_desc = "\n".join(f"> {line}" for line in description.split("\n"))
+            replacement = f"{match_text}\n\n<details>\n<summary>Image description</summary>\n\n{formatted_desc}\n\n</details>"
+
+            content = content.replace(match_text, replacement, 1)
+
+            print("done")
+            processed += 1
+
+            # Rate limit delay (skip after last image)
+            if i < len(images) - 1:
+                time.sleep(REQUEST_DELAY)
+
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
+
+    # Write updated markdown
+    if processed > 0:
+        md_path.write_text(content)
+        record_usage(processed)
+        print(f"Updated {md_path} with {processed} description(s)")
+
+    return processed
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Add AI descriptions to images in markdown files"
+    )
+    parser.add_argument("markdown_file", type=Path, nargs="?", help="Markdown file to process")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    parser.add_argument("--retry", action="store_true", help="Only process images without descriptions")
+    parser.add_argument("--no-cache", action="store_true",
+                       help="Process images even if hash was seen before")
+    parser.add_argument("--usage", action="store_true", help="Show usage stats and exit")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear the hash cache and exit")
+
+    args = parser.parse_args()
+
+    if args.usage:
+        usage = load_usage()
+        today = date.today().isoformat()
+        month = date.today().strftime("%Y-%m")
+        daily = usage.get("daily", {}).get(today, 0)
+        monthly = usage.get("monthly", {}).get(month, 0)
+        hash_count = len(usage.get("hashes", {}))
+        print(f"Today ({today}): {daily}/{DAILY_LIMIT}")
+        print(f"This month ({month}): {monthly}/{MONTHLY_LIMIT}")
+        print(f"Cached image hashes: {hash_count}")
+        return
+
+    if args.clear_cache:
+        usage = load_usage()
+        old_count = len(usage.get("hashes", {}))
+        usage["hashes"] = {}
+        save_usage(usage)
+        print(f"Cleared {old_count} cached hashes")
+        return
+
+    if not args.markdown_file:
+        parser.print_help()
+        sys.exit(1)
+
+    if not args.markdown_file.exists():
+        print(f"Error: File not found: {args.markdown_file}", file=sys.stderr)
+        sys.exit(1)
+
+    process_markdown(
+        args.markdown_file,
+        dry_run=args.dry_run,
+        retry=args.retry,
+        skip_cached=not args.no_cache
+    )
+
+
+if __name__ == "__main__":
+    main()

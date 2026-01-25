@@ -1,0 +1,44 @@
+#!/bin/bash
+# start-session - Start a new Claude Code session in a ccswitch worktree
+#
+# Usage: start-session [session-name]
+# If no name provided, prompts for one.
+#
+# This creates a worktree, opens a subshell there, and starts claude.
+# When you exit claude, you're back in your original directory.
+
+set -e
+
+# Get session name
+SESSION_NAME="$1"
+if [ -z "$SESSION_NAME" ]; then
+  read -p "Session name: " SESSION_NAME
+fi
+
+if [ -z "$SESSION_NAME" ]; then
+  echo "Error: Session name required"
+  exit 1
+fi
+
+# Create worktree via ccswitch (suppress cd and shell integration messages)
+echo "$SESSION_NAME" | command ccswitch create 2>&1 | grep -v -E "^cd |Shell integration|shell-init|source ~/|^$|^To enable|^Then reload"
+
+# Worktree path - ccswitch uses flat structure: ~/.ccswitch/<session-name>
+WORKTREE_PATH="$HOME/.ccswitch/$SESSION_NAME"
+
+if [ ! -d "$WORKTREE_PATH" ]; then
+  echo "Error: Worktree not created at $WORKTREE_PATH"
+  exit 1
+fi
+
+echo ""
+echo "Starting Claude Code in worktree..."
+echo "When you exit claude, run: close-session $SESSION_NAME"
+echo ""
+
+# Start subshell in worktree, run claude
+(cd "$WORKTREE_PATH" && claude)
+
+echo ""
+echo "Session ended. To merge and cleanup, run:"
+echo "  close-session $SESSION_NAME"

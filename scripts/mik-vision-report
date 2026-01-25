@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""
+Generate HTML report comparing Vision API outputs with source images and MinerU OCR.
+
+Usage:
+    mik-vision-report                          # Use latest results folder
+    mik-vision-report results/2026-01-23-gemini-2.5-flash
+    mik-vision-report --open                   # Generate and open in browser
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+TESTS_DIR = Path(__file__).parent.parent / "tests" / "vision-api"
+INPUTS_DIR = TESTS_DIR / "inputs"
+RESULTS_DIR = TESTS_DIR / "results"
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Vision API Test Results - {title}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #f5f5f5; }}
+        h1 {{ color: #333; }}
+        .file-section {{ background: white; margin: 20px 0; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .file-title {{ font-size: 1.3em; font-weight: bold; color: #2563eb; margin-bottom: 15px; border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }}
+        .content-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }}
+        .column {{ padding: 10px; }}
+        .column h3 {{ margin-top: 0; color: #666; font-size: 0.9em; text-transform: uppercase; }}
+        .column img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+        .ocr-content, .vision-content {{ background: #f9fafb; padding: 15px; border-radius: 4px; font-size: 0.85em; white-space: pre-wrap; max-height: 600px; overflow-y: auto; }}
+        .no-content {{ color: #999; font-style: italic; }}
+
+        /* PDF styles */
+        .pdf-section {{ border: 2px solid #2563eb; }}
+        .pdf-header {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }}
+        .pdf-viewer {{ height: 700px; }}
+        .pdf-viewer iframe {{ width: 100%; height: 100%; border: 1px solid #ddd; border-radius: 4px; }}
+        .pdf-ocr {{ max-height: 700px; overflow-y: auto; }}
+
+        /* PDF extracted images - visually linked */
+        .pdf-images-group {{
+            border-left: 4px solid #2563eb;
+            margin-left: 10px;
+            padding-left: 20px;
+            margin-top: 20px;
+        }}
+        .pdf-images-group h3 {{
+            color: #2563eb;
+            margin-bottom: 15px;
+            font-size: 1em;
+        }}
+        .pdf-image-row {{
+            background: #f8fafc;
+            margin-bottom: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }}
+        .pdf-image-row .content-grid {{ margin: 0; }}
+    </style>
+</head>
+<body>
+<h1>Vision API Test Results - {title}</h1>
+<p>Generated from: {results_path}</p>
+{content}
+</body>
+</html>
+"""
+
+
+def escape_html(text: str) -> str:
+    """Escape HTML special characters."""
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def extract_vision_description(content: str) -> str:
+    """Extract Vision API description from markdown details block."""
+    match = re.search(
+        r'<details>\s*<summary>Image description</summary>\s*(.*?)</details>',
+        content, re.DOTALL
+    )
+    if not match:
+        return ""
+    desc = match.group(1).strip()
+    # Remove blockquote prefixes
+    return re.sub(r'^>\s?', '', desc, flags=re.MULTILINE)
+
+
+def extract_ocr_content(content: str, exclude_images: bool = True) -> str:
+    """Extract MinerU OCR content from markdown body."""
+    # Get content after frontmatter, before details block
+    if exclude_images:
+        match = re.search(r'---\n.*?---\n(.*?)(?:<details>|$)', content, re.DOTALL)
+    else:
+        match = re.search(r'---\n.*?---\n(.*)$', content, re.DOTALL)
+
+    if not match:
+        return ""
+
+    body = match.group(1).strip()
+    # Remove title and image references for regular images
+    if exclude_images:
+        body = re.sub(r'^#.*$', '', body, flags=re.MULTILINE)
+        body = re.sub(r'!\[.*?\]\(.*?\)', '', body)
+    return body.strip()
+
+
+def load_pdf_image_descriptions(results_dir: Path, inputs_dir: Path) -> dict:
+    """Load Vision API descriptions for PDF-extracted images from all sources."""
+    descriptions = {}
+
+    # Pattern to match image references with descriptions
+    pattern = r'!\[.*?\]\([^)]*?([a-f0-9]{64})\.jpg\)\s*<details>\s*<summary>Image description</summary>\s*(.*?)</details>'
+
+    # Check results dir for pdf-*-images.md files
+    for md_file in results_dir.glob("pdf-*-images.md"):
+        content = md_file.read_text()
+        for hash_id, desc in re.findall(pattern, content, re.DOTALL):
+            descriptions[hash_id] = re.sub(r'^>\s?', '', desc.strip(), flags=re.MULTILINE)
+
+    # Also check inputs dir for any temporary processing files
+    for md_file in inputs_dir.glob("pdf-*.md"):
+        if md_file.suffix == '.pdf':
+            continue
+        content = md_file.read_text()
+        for hash_id, desc in re.findall(pattern, content, re.DOTALL):
+            if hash_id not in descriptions:
+                descriptions[hash_id] = re.sub(r'^>\s?', '', desc.strip(), flags=re.MULTILINE)
+
+    return descriptions
+
+
+def find_input_file(name: str, inputs_dir: Path) -> Path | None:
+    """Find input file by name, trying multiple extensions."""
+    for ext in [".png", ".jpeg", ".jpg"]:
+        path = inputs_dir / f"{name}{ext}"
+        if path.exists():
+            return path
+    return None
+
+
+def generate_image_section(name: str, content: str, inputs_dir: Path) -> str:
+    """Generate HTML for a regular image file (3-column layout)."""
+    vision_content = extract_vision_description(content)
+    ocr_content = extract_ocr_content(content)
+    input_file = find_input_file(name, inputs_dir)
+
+    if not input_file:
+        return f'<!-- Input file not found for {name} -->'
+
+    html = f'''<div class="file-section">
+<div class="file-title">{name}</div>
+<div class="content-grid">
+<div class="column"><h3>Source Image</h3>
+<img src="../../inputs/{input_file.name}" alt="{name}">
+</div>
+<div class="column"><h3>MinerU OCR</h3>
+'''
+
+    if ocr_content:
+        html += f'<div class="ocr-content">{escape_html(ocr_content)}</div>'
+    else:
+        html += '<p class="no-content">No OCR content (image-only processing)</p>'
+
+    html += '</div>\n<div class="column"><h3>Vision API</h3>\n'
+
+    if vision_content:
+        html += f'<div class="vision-content">{escape_html(vision_content)}</div>'
+    else:
+        html += '<p class="no-content">No Vision API description</p>'
+
+    html += '</div>\n</div></div>'
+    return html
+
+
+def generate_pdf_section(name: str, content: str, inputs_dir: Path,
+                         pdf_descriptions: dict) -> str:
+    """Generate HTML for a PDF file (head-to-head + extracted images)."""
+    ocr_content = extract_ocr_content(content, exclude_images=False)
+
+    html = f'''<div class="file-section pdf-section">
+<div class="file-title">📄 {name}</div>
+<div class="pdf-header">
+<div class="pdf-viewer"><h3>PDF Document</h3>
+<iframe src="../../inputs/{name}.pdf"></iframe>
+</div>
+<div class="pdf-ocr"><h3>MinerU OCR Output</h3>
+<div class="ocr-content">{escape_html(ocr_content)}</div>
+</div>
+</div>
+'''
+
+    # Add extracted images section
+    pdf_images_dir = inputs_dir / f"{name}_images"
+    if pdf_images_dir.exists():
+        html += '''<div class="pdf-images-group">
+<h3>📎 Extracted Images from PDF</h3>
+'''
+        for img in sorted(pdf_images_dir.glob("*.jpg")):
+            hash_id = img.stem
+            rel_path = f"../../inputs/{name}_images/{img.name}"
+            vision_desc = pdf_descriptions.get(hash_id, "")
+
+            html += f'''<div class="pdf-image-row">
+<div class="content-grid">
+<div class="column"><h3>Extracted Image</h3>
+<img src="{rel_path}" alt="{img.name[:20]}">
+</div>
+<div class="column"><h3>MinerU OCR</h3>
+<p class="no-content">N/A (image extracted from PDF)</p>
+</div>
+<div class="column"><h3>Vision API</h3>
+'''
+            if vision_desc:
+                html += f'<div class="vision-content">{escape_html(vision_desc)}</div>'
+            else:
+                html += '<p class="no-content">No description</p>'
+
+            html += '</div>\n</div></div>\n'
+
+        html += '</div>'
+
+    html += '</div>'
+    return html
+
+
+def generate_report(results_dir: Path, inputs_dir: Path) -> str:
+    """Generate the full HTML report."""
+    md_files = sorted(results_dir.glob("*.md"))
+
+    # Load PDF image descriptions
+    pdf_descriptions = load_pdf_image_descriptions(results_dir, inputs_dir)
+
+    sections = []
+    for md_file in md_files:
+        name = md_file.stem
+
+        # Skip auxiliary files
+        if name.endswith("-images"):
+            continue
+
+        content = md_file.read_text()
+
+        if name.startswith("pdf-"):
+            sections.append(generate_pdf_section(name, content, inputs_dir, pdf_descriptions))
+        else:
+            sections.append(generate_image_section(name, content, inputs_dir))
+
+    title = results_dir.name
+    return HTML_TEMPLATE.format(
+        title=title,
+        results_path=results_dir,
+        content='\n'.join(sections)
+    )
+
+
+def find_latest_results() -> Path | None:
+    """Find the most recent results directory."""
+    if not RESULTS_DIR.exists():
+        return None
+
+    dirs = sorted(RESULTS_DIR.iterdir(), reverse=True)
+    for d in dirs:
+        if d.is_dir() and not d.name.startswith('.'):
+            return d
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate HTML report for Vision API test results"
+    )
+    parser.add_argument(
+        "results_dir",
+        nargs="?",
+        help="Results directory (default: latest in tests/vision-api/results/)"
+    )
+    parser.add_argument(
+        "--open", "-o",
+        action="store_true",
+        help="Open report in browser after generation"
+    )
+    parser.add_argument(
+        "--output", "-O",
+        help="Output file path (default: report.html in results dir)"
+    )
+
+    args = parser.parse_args()
+
+    # Determine results directory
+    if args.results_dir:
+        results_dir = Path(args.results_dir)
+        if not results_dir.is_absolute():
+            # Try relative to tests/vision-api/results first
+            if (RESULTS_DIR / args.results_dir).exists():
+                results_dir = RESULTS_DIR / args.results_dir
+            elif not results_dir.exists():
+                print(f"Error: Results directory not found: {args.results_dir}", file=sys.stderr)
+                sys.exit(1)
+    else:
+        results_dir = find_latest_results()
+        if not results_dir:
+            print("Error: No results directories found", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"Generating report for: {results_dir.name}")
+
+    # Generate report
+    html = generate_report(results_dir, INPUTS_DIR)
+
+    # Write output
+    output_path = Path(args.output) if args.output else results_dir / "report.html"
+    output_path.write_text(html)
+    print(f"Report written to: {output_path}")
+
+    # Count files processed
+    md_count = len([f for f in results_dir.glob("*.md") if not f.stem.endswith("-images")])
+    print(f"Processed {md_count} test file(s)")
+
+    # Open in browser if requested
+    if args.open:
+        subprocess.run(["open", str(output_path)])
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,345 @@
+#!/bin/bash
+# mik-ingest: Process files from corpus/inbox/ to corpus/sources/
+# Usage: mik-ingest [--describe] [file|--all]
+#
+# Processes PDFs, images, and markdown files:
+# - PDFs/images: Convert via MinerU → markdown
+# - Markdown/text: Add frontmatter only
+# - Quality gate: Flag low-quality extractions for manual review
+# - Optional: Rich AI descriptions for semantic search (--describe flag)
+#
+# Requires: MinerU (pip install mineru[all] in Python 3.13 venv)
+# Optional: GEMINI_API_KEY for --describe flag (Gemini 2.5 Flash)
+
+set -e
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# CORPUS_PATH is required - set in .env or environment
+CORPUS_PATH="${CORPUS_PATH:?CORPUS_PATH environment variable required}"
+INBOX_DIR="$CORPUS_PATH/inbox"
+SOURCES_DIR="$CORPUS_PATH/sources"
+MINERU_BIN="${MINERU_BIN:-$HOME/.mineru-env/bin/mineru}"
+MINERU_PYTHON="${MINERU_PYTHON:-$HOME/.mineru-env/bin/python}"
+DESCRIBE_SCRIPT="$SCRIPT_DIR/mik-describe-images"
+TMP_DIR="/tmp/mik-ingest-$$"
+DESCRIBE_IMAGES=false
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Cleanup on exit
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+# Create temp directory
+mkdir -p "$TMP_DIR"
+
+# Logging
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Check if MinerU is available
+check_mineru() {
+    if [ ! -x "$MINERU_BIN" ]; then
+        log_error "MinerU not found at $MINERU_BIN"
+        log_info "Install with: python3.13 -m venv ~/.mineru-env && ~/.mineru-env/bin/pip install 'mineru[all]'"
+        exit 1
+    fi
+}
+
+# Generate slug from filename
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//'
+}
+
+# Detect capture format from file
+detect_format() {
+    local ext="${1##*.}"
+    case "$ext" in
+        md|txt) echo "manual" ;;
+        pdf|PDF) echo "pdf" ;;
+        png|jpg|jpeg|PNG|JPG|JPEG) echo "image" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Quality gate: Check if extraction is good enough
+check_quality() {
+    local file="$1"
+    local char_count=$(wc -c < "$file" | tr -d ' ')
+    local line_count=$(wc -l < "$file" | tr -d ' ')
+    local has_headings=$(grep -c '^#' "$file" 2>/dev/null || echo "0")
+
+    # Check for failures
+    if [ "$char_count" -lt 100 ]; then
+        log_warn "Quality: FAIL - Too few characters ($char_count)"
+        return 1
+    fi
+
+    if [ "$line_count" -lt 5 ] && [ "$has_headings" -eq 0 ]; then
+        log_warn "Quality: WARN - No structure detected"
+        return 2
+    fi
+
+    log_info "Quality: PASS ($char_count chars, $line_count lines, $has_headings headings)"
+    return 0
+}
+
+# Add frontmatter to markdown content
+add_frontmatter() {
+    local content_file="$1"
+    local original_file="$2"
+    local output_file="$3"
+
+    # Extract title from first heading or filename
+    local title=$(grep -m1 '^#' "$content_file" 2>/dev/null | sed 's/^#* *//' || basename "$original_file" | sed 's/\.[^.]*$//')
+    local date=$(date +%Y-%m-%d)
+    local slug=$(slugify "$(basename "$original_file" | sed 's/\.[^.]*$//')")
+    local format=$(detect_format "$original_file")
+
+    cat > "$output_file" <<EOF
+---
+id: $date-$slug
+title: "$title"
+source_type: research
+capture_format: $format
+date_captured: $date
+public: false
+tags: []
+permalink: sources/$date-$slug
+---
+
+EOF
+    cat "$content_file" >> "$output_file"
+}
+
+# Fix image paths in markdown (convert absolute to relative)
+fix_image_paths() {
+    local md_file="$1"
+    local images_src="$2"
+    local images_dest="$3"
+
+    # Copy images to destination
+    if [ -d "$images_src" ] && [ "$(ls -A "$images_src" 2>/dev/null)" ]; then
+        mkdir -p "$images_dest"
+        cp -r "$images_src"/* "$images_dest"/
+        log_info "Images saved to: $images_dest"
+
+        # Update image paths in markdown to be relative
+        local images_dir_name=$(basename "$images_dest")
+        sed -i '' "s|!\[\](images/|![]($images_dir_name/|g" "$md_file" 2>/dev/null || \
+        sed -i "s|!\[\](images/|![]($images_dir_name/|g" "$md_file"
+    fi
+}
+
+# Describe images with Gemini Flash Vision API
+describe_images() {
+    local md_file="$1"
+    if [ "$DESCRIBE_IMAGES" = true ] && [ -f "$DESCRIBE_SCRIPT" ]; then
+        log_info "Adding image descriptions via Gemini Flash..."
+        "$MINERU_PYTHON" "$DESCRIBE_SCRIPT" "$md_file" || log_warn "Image description failed (continuing)"
+    fi
+}
+
+# Process a single file with MinerU
+process_file() {
+    local file="$1"
+    local filename=$(basename "$file")
+    local ext="${filename##*.}"
+    local basename="${filename%.*}"
+    local date=$(date +%Y-%m-%d)
+    local slug=$(slugify "$basename")
+    local output_name="$date-$slug.md"
+    local output_path="$SOURCES_DIR/$output_name"
+
+    log_info "Processing: $filename"
+
+    # Skip HANDOVER.md and other special files
+    if [[ "$filename" == "HANDOVER.md" ]] || [[ "$filename" == "article-4-draft-notes.md" ]]; then
+        log_info "Skipping special file: $filename"
+        return 0
+    fi
+
+    case "$ext" in
+        md|txt)
+            # Already markdown — just add frontmatter
+            log_info "Type: Markdown/text - adding frontmatter"
+            add_frontmatter "$file" "$file" "$output_path"
+            ;;
+
+        pdf|PDF)
+            # Convert with MinerU
+            log_info "Type: PDF - converting with MinerU (pipeline backend)"
+            local mineru_out="$TMP_DIR/mineru-out"
+            mkdir -p "$mineru_out"
+
+            "$MINERU_BIN" -p "$file" -o "$mineru_out" -b pipeline -l en 2>&1 | grep -E "INFO|ERROR|WARN" | head -10
+
+            # Find the output markdown file (MinerU structure: output/<basename>/auto/<basename>.md)
+            local md_file=$(find "$mineru_out" -name "*.md" -type f | head -1)
+            if [ -z "$md_file" ]; then
+                log_error "MinerU produced no output for: $filename"
+                return 1
+            fi
+
+            # Check quality
+            check_quality "$md_file"
+            local quality_result=$?
+
+            # Create temp file with frontmatter
+            local temp_output="$TMP_DIR/output.md"
+            add_frontmatter "$md_file" "$file" "$temp_output"
+
+            # Handle images
+            local images_src=$(dirname "$md_file")/images
+            local images_dest="$SOURCES_DIR/${output_name%.md}_images"
+
+            # Copy to final location
+            cp "$temp_output" "$output_path"
+            fix_image_paths "$output_path" "$images_src" "$images_dest"
+
+            # Cleanup
+            rm -rf "$mineru_out"
+
+            # Describe images if requested
+            describe_images "$output_path"
+
+            if [ $quality_result -eq 1 ]; then
+                log_warn "File flagged for manual review: $output_path"
+            fi
+            ;;
+
+        png|jpg|jpeg|PNG|JPG|JPEG)
+            # Image — OCR with MinerU (VLM backend for better quality)
+            log_info "Type: Image - OCR with MinerU (vlm-auto-engine backend)"
+            local mineru_out="$TMP_DIR/mineru-out"
+            mkdir -p "$mineru_out"
+
+            "$MINERU_BIN" -p "$file" -o "$mineru_out" -b vlm-auto-engine 2>&1 | grep -E "INFO|ERROR|WARN" | head -10
+
+            # Find the output markdown file
+            local md_file=$(find "$mineru_out" -name "*.md" -type f | head -1)
+            if [ -z "$md_file" ]; then
+                log_error "MinerU produced no output for: $filename"
+                return 1
+            fi
+
+            # Check quality
+            check_quality "$md_file"
+
+            # Create temp file with frontmatter
+            local temp_output="$TMP_DIR/output.md"
+            add_frontmatter "$md_file" "$file" "$temp_output"
+
+            # Handle images
+            local images_src=$(dirname "$md_file")/images
+            local images_dest="$SOURCES_DIR/${output_name%.md}_images"
+
+            # Copy to final location
+            cp "$temp_output" "$output_path"
+            fix_image_paths "$output_path" "$images_src" "$images_dest"
+
+            # Cleanup
+            rm -rf "$mineru_out"
+
+            # Describe images if requested
+            describe_images "$output_path"
+            ;;
+
+        *)
+            log_warn "Unknown file type: $ext, skipping $filename"
+            return 1
+            ;;
+    esac
+
+    log_info "Output: $output_path"
+    return 0
+}
+
+# Main
+main() {
+    # Parse flags
+    while [[ "$1" == --* ]]; do
+        case "$1" in
+            --describe)
+                DESCRIBE_IMAGES=true
+                shift
+                ;;
+            --all)
+                break  # Handle in the next section
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    check_mineru
+
+    if [ "$1" == "--all" ]; then
+        # Process all files in inbox
+        log_info "Processing all files in $INBOX_DIR"
+        local count=0
+        local success=0
+
+        for file in "$INBOX_DIR"/*; do
+            if [ -f "$file" ]; then
+                count=$((count + 1))
+                if process_file "$file"; then
+                    success=$((success + 1))
+                fi
+            fi
+        done
+
+        log_info "Processed $success/$count files"
+
+    elif [ -n "$1" ]; then
+        # Process specific file
+        if [ -f "$1" ]; then
+            process_file "$1"
+        else
+            log_error "File not found: $1"
+            exit 1
+        fi
+
+    else
+        # Show usage
+        echo "Usage: mik-ingest [--describe] [file|--all]"
+        echo ""
+        echo "Options:"
+        echo "  file        Process a specific file"
+        echo "  --all       Process all files in corpus/inbox/"
+        echo "  --describe  Add AI descriptions to extracted images (for semantic search)"
+        echo ""
+        echo "Environment variables:"
+        echo "  CORPUS_PATH      Path to corpus directory (required)"
+        echo "  MINERU_BIN       Override MinerU binary path"
+        echo "  GEMINI_API_KEY   API key for image descriptions (required for --describe)"
+        echo ""
+        echo "Backends:"
+        echo "  - PDFs use 'pipeline' backend (fast, good quality)"
+        echo "  - Images use 'vlm-auto-engine' backend (slower, better OCR)"
+        echo ""
+        echo "Image description features:"
+        echo "  - Full diagram transcription with structure/ASCII art"
+        echo "  - Skips tiny images (<5KB, likely icons)"
+        echo "  - Hash-based dedup (won't re-describe same image)"
+        echo "  - Rate limiting with retry (5 req/min free tier)"
+        echo ""
+        echo "Usage tracking:"
+        echo "  mik-describe-images --usage       Show daily/monthly stats"
+        echo "  mik-describe-images --retry FILE  Only describe images missing descriptions"
+        exit 0
+    fi
+}
+
+main "$@"

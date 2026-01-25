@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# sync-memory: Sync local Basic-Memory corpus to cloud
+#
+# Run daily (or when needed) to push local changes to cloud.
+# Required for claude.ai/mobile access to corpus.
+#
+# Usage:
+#   sync-memory           # Bidirectional sync
+#   sync-memory --check   # Verify sync status without transferring
+#
+# Requires: Basic-Memory cloud account (basicmemory.com)
+#
+
+set -euo pipefail
+
+BM="uvx basic-memory@0.15.0"
+LOGGED_IN=false
+
+cleanup() {
+    if $LOGGED_IN; then
+        $BM cloud logout >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+
+if [[ "${1:-}" == "--check" ]]; then
+    echo "Checking sync status..."
+    $BM cloud login
+    LOGGED_IN=true
+    $BM cloud check
+    exit 0
+fi
+
+echo "Syncing to Basic-Memory cloud..."
+$BM cloud login
+LOGGED_IN=true
+$BM cloud bisync
+echo "Done."

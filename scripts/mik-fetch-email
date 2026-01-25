@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""
+mik-fetch-email: Fetch emails from Gmail corpus-inbox label
+
+Connects via IMAP, extracts content and attachments, saves to corpus/inbox/
+for processing by mik-ingest.
+
+Features:
+- Extracts subject, body (plain text preferred, HTML converted), attachments
+- Extracts links from body into frontmatter for later agentic processing
+- Filters junk images: inline images < 20KB skipped (signatures, social icons, tracking pixels)
+- Moves processed emails to corpus/processed label
+
+Prerequisites:
+1. Enable 2-Step Verification in Google Account
+2. Create App Password: https://myaccount.google.com/apppasswords
+3. Set environment variables:
+   export GMAIL_USER="your@gmail.com"
+   export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
+4. Create Gmail labels: corpus/inbox (source), corpus/processed (done)
+5. Create Gmail filter: to:<your-save-address> -> apply corpus/inbox, skip inbox
+
+Usage:
+    mik-fetch-email              # Fetch all unprocessed emails
+    mik-fetch-email --dry-run    # Show what would be fetched
+    mik-fetch-email --keep       # Don't mark as processed (for testing)
+"""
+
+import argparse
+import email
+import html
+import imaplib
+import os
+import re
+import sys
+from datetime import datetime
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import Optional
+
+# Try to import html2text, fall back to simple regex if not available
+try:
+    import html2text
+    HAS_HTML2TEXT = True
+except ImportError:
+    HAS_HTML2TEXT = False
+
+
+def get_config():
+    """Get configuration from environment or defaults."""
+    script_dir = Path(__file__).parent
+    repo_dir = script_dir.parent
+
+    return {
+        'gmail_user': os.environ.get('GMAIL_USER'),
+        'gmail_password': os.environ.get('GMAIL_APP_PASSWORD'),
+        'imap_server': 'imap.gmail.com',
+        'imap_port': 993,
+        'source_label': 'corpus/inbox',
+        'processed_label': 'corpus/processed',
+        'inbox_dir': Path(os.environ.get('CORPUS_PATH', repo_dir / 'corpus')) / 'inbox',
+    }
+
+
+def decode_mime_header(header_value: str) -> str:
+    """Decode MIME-encoded header (e.g., subject, from)."""
+    if not header_value:
+        return ""
+
+    decoded_parts = []
+    for part, charset in decode_header(header_value):
+        if isinstance(part, bytes):
+            charset = charset or 'utf-8'
+            try:
+                decoded_parts.append(part.decode(charset, errors='replace'))
+            except (LookupError, UnicodeDecodeError):
+                decoded_parts.append(part.decode('utf-8', errors='replace'))
+        else:
+            decoded_parts.append(part)
+
+    return ' '.join(decoded_parts)
+
+
+def extract_links(text: str) -> list[str]:
+    """Extract URLs from text."""
+    url_pattern = r'https?://[^\s<>\[\]()"\',;]+[^\s<>\[\]()"\',;.]'
+    urls = re.findall(url_pattern, text)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique.append(url)
+    return unique
+
+
+def html_to_markdown(html_content: str) -> str:
+    """Convert HTML to markdown."""
+    if HAS_HTML2TEXT:
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = False
+        h.body_width = 0  # Don't wrap
+        return h.handle(html_content)
+    else:
+        # Simple fallback: strip tags, decode entities
+        text = re.sub(r'<br\s*/?>', '\n', html_content, flags=re.IGNORECASE)
+        text = re.sub(r'<p[^>]*>', '\n\n', text, flags=re.IGNORECASE)
+        text = re.sub(r'</p>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = html.unescape(text)
+        return text.strip()
+
+
+def slugify(text: str) -> str:
+    """Convert text to URL-friendly slug."""
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    text = re.sub(r'-+', '-', text)
+    return text.strip('-')[:60]
+
+
+def get_email_body(msg: email.message.Message) -> tuple[str, str]:
+    """
+    Extract email body, preferring plain text.
+    Returns (body_text, content_type).
+    """
+    plain_body = None
+    html_body = None
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition", ""))
+
+            # Skip attachments
+            if "attachment" in content_disposition:
+                continue
+
+            if content_type == "text/plain" and plain_body is None:
+                payload = part.get_payload(decode=True)
+                charset = part.get_content_charset() or 'utf-8'
+                try:
+                    plain_body = payload.decode(charset, errors='replace')
+                except (LookupError, UnicodeDecodeError):
+                    plain_body = payload.decode('utf-8', errors='replace')
+
+            elif content_type == "text/html" and html_body is None:
+                payload = part.get_payload(decode=True)
+                charset = part.get_content_charset() or 'utf-8'
+                try:
+                    html_body = payload.decode(charset, errors='replace')
+                except (LookupError, UnicodeDecodeError):
+                    html_body = payload.decode('utf-8', errors='replace')
+    else:
+        content_type = msg.get_content_type()
+        payload = msg.get_payload(decode=True)
+        charset = msg.get_content_charset() or 'utf-8'
+        try:
+            text = payload.decode(charset, errors='replace')
+        except (LookupError, UnicodeDecodeError):
+            text = payload.decode('utf-8', errors='replace')
+
+        if content_type == "text/plain":
+            plain_body = text
+        elif content_type == "text/html":
+            html_body = text
+
+    # Prefer plain text, fall back to converted HTML
+    if plain_body:
+        return plain_body.strip(), "text/plain"
+    elif html_body:
+        return html_to_markdown(html_body), "text/html"
+    else:
+        return "", "unknown"
+
+
+# Junk image filter: skip inline images smaller than this (keep in sync with mik-describe-images MIN_IMAGE_SIZE)
+# Catches: signature logos (~5-10KB), social icons (~2-5KB), tracking pixels (< 1KB)
+INLINE_IMAGE_THRESHOLD = 10 * 1024  # 10KB
+
+
+def get_attachments(msg: email.message.Message) -> tuple[list[dict], list[dict]]:
+    """
+    Extract attachment info from email, filtering signature images.
+
+    Returns (attachments, skipped) where:
+    - attachments: files to save
+    - skipped: inline images filtered as likely signatures
+
+    Filter logic:
+    - Content-Disposition: attachment -> always save
+    - Content-Disposition: inline + size < 10KB -> skip (signature)
+    - Content-Disposition: inline + size >= 10KB -> save (content image)
+    """
+    attachments = []
+    skipped = []
+
+    if not msg.is_multipart():
+        return attachments, skipped
+
+    for part in msg.walk():
+        content_disposition = str(part.get("Content-Disposition", ""))
+        filename = part.get_filename()
+
+        if not filename:
+            continue
+
+        filename = decode_mime_header(filename)
+        payload = part.get_payload(decode=True)
+
+        if not payload:
+            continue
+
+        size = len(payload)
+        is_inline = "inline" in content_disposition
+        is_attachment = "attachment" in content_disposition
+        is_image = part.get_content_type().startswith("image/")
+
+        # Filter signature images: inline + small + image
+        if is_inline and is_image and size < INLINE_IMAGE_THRESHOLD:
+            skipped.append({
+                'filename': filename,
+                'content_type': part.get_content_type(),
+                'size': size,
+                'reason': 'inline image < 20KB (signature/social icon/tracking pixel)',
+            })
+            continue
+
+        # Save if explicitly attachment, or has filename (fallback for missing disposition)
+        if is_attachment or filename:
+            attachments.append({
+                'filename': filename,
+                'content_type': part.get_content_type(),
+                'data': payload,
+                'size': size,
+            })
+
+    return attachments, skipped
+
+
+def save_email(msg: email.message.Message, inbox_dir: Path, dry_run: bool = False) -> Optional[Path]:
+    """
+    Save email content and attachments to inbox directory.
+    Returns path to saved markdown file, or None if dry_run.
+    """
+    # Extract metadata
+    subject = decode_mime_header(msg.get('Subject', 'No Subject'))
+    from_addr = decode_mime_header(msg.get('From', 'Unknown'))
+    date_str = msg.get('Date', '')
+    message_id = msg.get('Message-ID', '')
+
+    # Parse date
+    try:
+        email_date = parsedate_to_datetime(date_str)
+    except (TypeError, ValueError):
+        email_date = datetime.now()
+
+    date_prefix = email_date.strftime('%Y-%m-%d')
+    time_suffix = email_date.strftime('%H%M')
+
+    # Generate filename
+    slug = slugify(subject) or 'email'
+    base_filename = f"{date_prefix}-{slug}-{time_suffix}"
+
+    # Extract body and links
+    body, content_type = get_email_body(msg)
+    links = extract_links(body)
+
+    # Extract attachments (filters signature images)
+    attachments, skipped = get_attachments(msg)
+
+    # Print summary
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing email:")
+    print(f"  Subject: {subject}")
+    print(f"  From: {from_addr}")
+    print(f"  Date: {email_date}")
+    print(f"  Body: {len(body)} chars ({content_type})")
+    print(f"  Links: {len(links)}")
+    print(f"  Attachments: {len(attachments)}")
+    if skipped:
+        print(f"  Skipped: {len(skipped)} (signature images)")
+
+    if dry_run:
+        for link in links[:5]:
+            print(f"    - {link}")
+        if len(links) > 5:
+            print(f"    ... and {len(links) - 5} more")
+        for att in attachments:
+            print(f"    [att] {att['filename']} ({att['size']} bytes)")
+        for skip in skipped:
+            print(f"    [skip] {skip['filename']} ({skip['size']} bytes) - {skip['reason']}")
+        return None
+
+    # Create output directory
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build markdown content
+    links_yaml = '\n'.join(f'  - "{link}"' for link in links) if links else '[]'
+    attachments_yaml = '\n'.join(f'  - "{att["filename"]}"' for att in attachments) if attachments else '[]'
+
+    md_content = f"""---
+id: {base_filename}
+title: "{subject.replace('"', "'")}"
+source_type: email
+capture_format: email
+date_captured: {date_prefix}
+email_from: "{from_addr.replace('"', "'")}"
+email_date: "{email_date.isoformat()}"
+message_id: "{message_id}"
+original_content_type: {content_type}
+links:
+{links_yaml}
+attachments:
+{attachments_yaml}
+public: false
+tags: []
+permalink: sources/{base_filename}
+---
+
+# {subject}
+
+**From:** {from_addr}
+**Date:** {email_date.strftime('%Y-%m-%d %H:%M')}
+
+---
+
+{body}
+"""
+
+    # Add links section if any
+    if links:
+        md_content += "\n\n---\n\n## Links found in email\n\n"
+        for link in links:
+            md_content += f"- <{link}>\n"
+
+    # Save markdown file
+    md_path = inbox_dir / f"{base_filename}.md"
+    md_path.write_text(md_content)
+    print(f"  Saved: {md_path}")
+
+    # Save attachments
+    for att in attachments:
+        # Sanitize filename
+        safe_filename = re.sub(r'[^\w\-_\.]', '_', att['filename'])
+        att_path = inbox_dir / f"{base_filename}-{safe_filename}"
+        att_path.write_bytes(att['data'])
+        print(f"  Saved attachment: {att_path}")
+
+    return md_path
+
+
+def connect_imap(config: dict) -> imaplib.IMAP4_SSL:
+    """Connect to Gmail IMAP."""
+    if not config['gmail_user'] or not config['gmail_password']:
+        print("Error: GMAIL_USER and GMAIL_APP_PASSWORD environment variables required")
+        print("\nSetup instructions:")
+        print("1. Enable 2-Step Verification: https://myaccount.google.com/security")
+        print("2. Create App Password: https://myaccount.google.com/apppasswords")
+        print("3. Set environment variables:")
+        print('   export GMAIL_USER="your@gmail.com"')
+        print('   export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"')
+        sys.exit(1)
+
+    print(f"Connecting to {config['imap_server']}...")
+    imap = imaplib.IMAP4_SSL(config['imap_server'], config['imap_port'])
+    imap.login(config['gmail_user'], config['gmail_password'])
+    print(f"Connected as {config['gmail_user']}")
+    return imap
+
+
+def fetch_emails(dry_run: bool = False, keep: bool = False):
+    """Main function to fetch and process emails."""
+    config = get_config()
+
+    # Connect
+    imap = connect_imap(config)
+
+    try:
+        # Select the label (Gmail labels appear as folders)
+        # Gmail uses special folder format: [Gmail]/Label Name or just Label Name
+        label = config['source_label']
+
+        # Try direct label name first
+        status, _ = imap.select(f'"{label}"')
+        if status != 'OK':
+            # Try Gmail label format
+            status, _ = imap.select(f'"[Gmail]/{label}"')
+            if status != 'OK':
+                print(f"Error: Could not find label '{label}'")
+                print("\nAvailable folders:")
+                status, folders = imap.list()
+                if status == 'OK':
+                    for folder in folders[:20]:
+                        print(f"  {folder.decode()}")
+                sys.exit(1)
+
+        print(f"Searching in label: {label}")
+
+        # Search for all messages using UID (stable identifiers)
+        status, messages = imap.uid('search', None, 'ALL')
+        if status != 'OK':
+            print("Error searching for messages")
+            sys.exit(1)
+
+        message_uids = messages[0].split()
+        print(f"Found {len(message_uids)} email(s)")
+
+        if not message_uids:
+            print("No emails to process")
+            return
+
+        processed = 0
+        for uid in message_uids:
+            # Fetch the email using UID
+            status, msg_data = imap.uid('fetch', uid, '(RFC822)')
+            if status != 'OK' or not msg_data or not msg_data[0]:
+                print(f"Error fetching message UID {uid}")
+                continue
+
+            # Parse the email
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+
+            # Save to inbox
+            saved_path = save_email(msg, config['inbox_dir'], dry_run=dry_run)
+
+            if saved_path and not keep:
+                # Move to processed label by copying and deleting (using UID)
+                processed_label = config['processed_label']
+                imap.uid('copy', uid, f'"{processed_label}"')
+                # Then mark for deletion from source
+                imap.uid('store', uid, '+FLAGS', '\\Deleted')
+                print(f"  Moved to '{processed_label}'")
+
+            processed += 1
+
+        # Expunge deleted messages
+        if not dry_run and not keep:
+            imap.expunge()
+
+        print(f"\n{'[DRY RUN] Would process' if dry_run else 'Processed'} {processed} email(s)")
+
+        if not dry_run:
+            print(f"\nNext step: run 'mik-ingest --all' to process attachments")
+
+    finally:
+        imap.logout()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Fetch emails from Gmail corpus-inbox label',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be fetched without saving')
+    parser.add_argument('--keep', action='store_true',
+                        help="Don't mark emails as processed (for testing)")
+
+    args = parser.parse_args()
+
+    fetch_emails(dry_run=args.dry_run, keep=args.keep)
+
+
+if __name__ == '__main__':
+    main()

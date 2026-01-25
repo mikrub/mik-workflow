@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git worktree:*)",
+      "Bash(ls:*)",
+      "Bash(du:*)",
+      "Bash(find:*)",
+      "Bash(chmod:*)",
+      "Bash(echo:*)"
+    ]
+  }
+}

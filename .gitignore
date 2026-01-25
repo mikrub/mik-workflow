@@ -1,0 +1,21 @@
+# Environment (contains secrets)
+.env
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Test outputs (keep inputs, ignore generated results)
+tests/vision-api/results/
+
+# Claude Code local settings
+.claude/settings.local.json

@@ -1,0 +1,36 @@
+version: "3.8"
+
+# Basic-Memory SSE server for remote MCP access (e.g., from claude.ai via tunnel)
+#
+# Prerequisites:
+# 1. Set CORPUS_PATH in .env (or environment)
+# 2. Create config directory: mkdir -p ~/.basic-memory-docker
+#
+# Usage:
+# docker-compose up -d
+# Then expose via Cloudflare Tunnel or similar
+
+services:
+  basic-memory:
+    image: ghcr.io/basicmachines-co/basic-memory:latest
+    container_name: basic-memory-sse
+    ports:
+      - "8000:8000"
+    volumes:
+      # Your corpus directory (from CORPUS_PATH env var)
+      - ${CORPUS_PATH}:/app/data/corpus
+      # Persistent config/database
+      - ${HOME}/.basic-memory-docker:/home/appuser/.basic-memory
+    environment:
+      - BASIC_MEMORY_DEFAULT_PROJECT=corpus
+      - BASIC_MEMORY_SYNC_CHANGES=true
+      - BASIC_MEMORY_LOG_LEVEL=INFO
+    command: basic-memory mcp --transport sse --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "basic-memory", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# No named volumes needed - using bind mounts

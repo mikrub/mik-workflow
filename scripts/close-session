@@ -1,0 +1,53 @@
+#!/bin/bash
+# close-session - Merge and cleanup a ccswitch session
+#
+# Usage: close-session <session-name>
+#
+# This:
+# 1. Goes to main repo
+# 2. Merges feature/<session-name> into main
+# 3. Pushes to remote
+# 4. Cleans up the ccswitch worktree
+#
+# Requires: MAIN_REPO environment variable (path to main content repo)
+
+set -e
+
+SESSION_NAME="$1"
+if [ -z "$SESSION_NAME" ]; then
+  echo "Usage: close-session <session-name>"
+  echo ""
+  echo "Active sessions:"
+  ls -1 "$HOME/.ccswitch/" 2>/dev/null | grep -v "^\." || echo "  (none)"
+  exit 1
+fi
+
+# Require MAIN_REPO env var
+MAIN_REPO="${MAIN_REPO:?MAIN_REPO environment variable required (path to main content repo)}"
+BRANCH_NAME="feature/$SESSION_NAME"
+
+echo "Closing session: $SESSION_NAME"
+echo ""
+
+# Check if branch exists
+if ! git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+  echo "Error: Branch $BRANCH_NAME does not exist"
+  exit 1
+fi
+
+# Go to main repo and merge
+echo "1. Merging $BRANCH_NAME into main..."
+cd "$MAIN_REPO"
+git checkout main
+git merge "$BRANCH_NAME" --no-edit
+
+echo ""
+echo "2. Pushing to remote..."
+git push
+
+echo ""
+echo "3. Cleaning up worktree..."
+echo "y" | command ccswitch cleanup "$SESSION_NAME" 2>&1
+
+echo ""
+echo "Session $SESSION_NAME closed successfully."
