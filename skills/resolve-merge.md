@@ -11,9 +11,12 @@ Intelligently resolve git merge conflicts by understanding the semantic meaning 
 
 ## When to use
 
-When `close-session <name>` fails with merge conflicts:
+When `close-session <name>` fails with merge conflicts in either:
+- The main content repo (mik-workflow)
+- The state repo (`$STATE_REPO` - contains HANDOVER.md, project-log.md)
+
 ```
-CONFLICT (content): Merge conflict in corpus/inbox/HANDOVER.md
+CONFLICT (content): Merge conflict in HANDOVER.md
 Automatic merge failed; fix conflicts and then commit the result.
 ```
 
@@ -49,15 +52,15 @@ git status | grep "both modified"
 
 Read each conflicted file and identify its type:
 
-| File pattern | Type | Merge strategy |
-|--------------|------|----------------|
-| `HANDOVER.md` | Session state | Combine "Just completed" sections, take latest state table |
-| `mikrub-project-log.md` | Append-only history | Keep ALL entries from both sides (never lose history) |
-| `*-draft*.md` | Living draft | Combine additions, resolve conflicting edits by content |
-| `*.md` in `skills/` | Procedure doc | Keep both additions (e.g., both anti-patterns) |
-| `mik-knowledge-system-architecture.md` | Architecture doc | Bump version, merge sections |
-| `weekend-*-guide.md` | Setup guide | Keep both additions, update status |
-| Config files | Settings | Case-by-case, usually take newer |
+| File pattern | Location | Type | Merge strategy |
+|--------------|----------|------|----------------|
+| `HANDOVER.md` | `$STATE_REPO` | Session state | Combine "Just completed" sections, take latest state table |
+| `project-log.md` | `$STATE_REPO` | Append-only history | Keep ALL entries from both sides (never lose history) |
+| `*-draft*.md` | content repo | Living draft | Combine additions, resolve conflicting edits by content |
+| `*.md` in `skills/` | mik-workflow | Procedure doc | Keep both additions (e.g., both anti-patterns) |
+| `mik-knowledge-system-architecture.md` | corpus | Architecture doc | Bump version, merge sections |
+| `weekend-*-guide.md` | corpus | Setup guide | Keep both additions, update status |
+| Config files | varies | Settings | Case-by-case, usually take newer |
 
 ### Step 3: Resolve each file
 
@@ -99,7 +102,7 @@ ccswitch cleanup <session-name>
 
 ## Merge strategies by file type
 
-### HANDOVER.md (session state)
+### HANDOVER.md (session state, in STATE_REPO)
 
 **Philosophy:** HANDOVER reflects current state, not history.
 
@@ -110,7 +113,7 @@ ccswitch cleanup <session-name>
 - **"Next session":** Combine options from both
 - **File locations:** Merge to show all new files
 
-### mikrub-project-log.md (append-only)
+### project-log.md (append-only, in STATE_REPO)
 
 **Philosophy:** Never lose history. All entries are valid.
 

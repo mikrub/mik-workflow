@@ -63,8 +63,21 @@ echo ""
 echo "2. Pushing to remote..."
 git push
 
+# Merge state repo branch (for HANDOVER.md, project-log.md)
+if [ -n "$STATE_REPO" ] && [ -d "$STATE_REPO/.git" ]; then
+  if git -C "$STATE_REPO" show-ref --verify --quiet "refs/heads/session-$SESSION_NAME"; then
+    echo ""
+    echo "3. Merging state branch..."
+    git -C "$STATE_REPO" checkout main
+    git -C "$STATE_REPO" merge "session-$SESSION_NAME" --no-edit
+    git -C "$STATE_REPO" branch -d "session-$SESSION_NAME"
+    git -C "$STATE_REPO" push
+    echo "State branch merged and pushed"
+  fi
+fi
+
 echo ""
-echo "3. Cleaning up worktree..."
+echo "4. Cleaning up worktree..."
 echo "y" | command ccswitch cleanup "$SESSION_NAME" 2>&1
 
 echo ""

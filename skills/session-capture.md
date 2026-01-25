@@ -46,7 +46,7 @@ Based on analysis, update the appropriate files:
 | Architecture decision | `corpus/sources/mik-knowledge-system-architecture.md` | New section or update existing. Include version bump. |
 | Setup/config change | Current weekend guide (e.g., `weekend-2-guide.md`) | Add/update steps, gotchas, version pins |
 | Story development | Current article draft (e.g., `the-residue-article-3-draft.md`) | New section or update narrative |
-| Always | `corpus/sources/mikrub-project-log.md` | Summary via `/update-project-log` |
+| Always | `$STATE_REPO/project-log.md` | Summary via `/update-project-log` |
 
 ### Step 3: Check for compound updates
 

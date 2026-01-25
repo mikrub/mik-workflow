@@ -51,7 +51,8 @@ git log --oneline -10
 ### 2. Read current log
 
 ```bash
-cat corpus/sources/mikrub-project-log.md
+# STATE_REPO is set in .env (e.g., ~/repos/mik-workflow-state)
+cat "$STATE_REPO/project-log.md"
 ```
 
 ### 3. Gather context from conversation
@@ -67,7 +68,7 @@ Review the conversation history in your context window:
 Combine git changes + conversation context into a comprehensive entry.
 
 ```bash
-cat >> corpus/sources/mikrub-project-log.md << 'EOF'
+cat >> "$STATE_REPO/project-log.md" << 'EOF'
 
 ## YYYY-MM-DD: Brief descriptive title
 
@@ -76,12 +77,13 @@ cat >> corpus/sources/mikrub-project-log.md << 'EOF'
 EOF
 ```
 
-### 5. Commit
+### 5. Commit in state repo
 
 ```bash
-git add corpus/sources/mikrub-project-log.md
+cd "$STATE_REPO"
+git add project-log.md
 git commit -m "log: [brief description of session]"
-git push
+# Note: close-session will handle push and merge to main
 ```
 
 ---
@@ -132,7 +134,7 @@ Freeform observations, insights, gotchas encountered.
 
 ### 4. Present for manual commit
 
-Provide the entry for the user to append to `corpus/sources/mikrub-project-log.md` and commit.
+Provide the entry for the user to append to `$STATE_REPO/project-log.md` and commit.
 
 ---
 

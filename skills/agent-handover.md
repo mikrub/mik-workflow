@@ -11,16 +11,19 @@ Enable context continuity between Claude sessions. When ending a session, create
 
 ## Files involved
 
-- `corpus/inbox/HANDOVER.md` — Current state artifact (overwritten each session)
-- `corpus/sources/mikrub-project-log.md` — Persistent history (appended)
-- `.claude/skills/` — Procedural knowledge (stable reference)
+- `$STATE_REPO/HANDOVER.md` — Current state artifact (overwritten each session)
+- `$STATE_REPO/project-log.md` — Persistent history (appended)
+- `skills/` — Procedural knowledge (stable reference)
+
+**Note:** `STATE_REPO` is configured in `.env` and points to a separate private git repo (e.g., `~/repos/mik-workflow-state/`). This enables branch-based merge protection for parallel sessions.
 
 ## Starting a new session
 
 ### 1. Read the handover
 
 ```bash
-cat corpus/inbox/HANDOVER.md
+# STATE_REPO is set in .env (e.g., ~/repos/mik-workflow-state)
+cat "$STATE_REPO/HANDOVER.md"
 ```
 
 This tells you:
@@ -39,7 +42,7 @@ git log --oneline -5
 ### 3. Read project log if needed
 
 ```bash
-cat corpus/sources/mikrub-project-log.md
+cat "$STATE_REPO/project-log.md"
 ```
 
 ## Ending a session
@@ -48,38 +51,23 @@ cat corpus/sources/mikrub-project-log.md
 
 Use `/update-project-log` skill to append session summary.
 
-### 2. Fetch latest HANDOVER from main (CRITICAL for parallel sessions)
+### 2. Update HANDOVER in state repo
 
-With ccswitch, multiple sessions may run in parallel. Another session may have updated HANDOVER.md and merged to main. **Always fetch before writing:**
+The state repo uses branch-based merge protection. Each session gets its own branch (created by `start-session`), and `close-session` handles the merge. This means:
 
-```bash
-# Check for upstream changes
-git fetch origin main
-git diff HEAD origin/main -- corpus/inbox/HANDOVER.md
-```
+- You edit `$STATE_REPO/HANDOVER.md` directly in your session
+- Git handles merge conflicts when sessions close
+- No need to manually fetch/merge from main
 
-If there are changes:
-```bash
-# Get the latest version from main
-git checkout origin/main -- corpus/inbox/HANDOVER.md
-```
-
-Then **merge** your session's updates into the fetched version — don't blindly overwrite.
-
-**What to preserve from other sessions:**
-- Their "Just completed" section (move to a "Recently completed" or just note it)
-- Any "Next session" plans they added
-- Reference sections (MinerU setup, etc.) unless outdated
-- Reminders and deadlines
-
-**What to update with your session:**
+**What to include:**
 - "Just completed" — your work
 - "Current state" table — update relevant rows
 - Add your reference sections if new (e.g., Email capture setup)
+- Preserve existing reference sections unless outdated
 
 ### 3. Write the handover artifact
 
-Update `corpus/inbox/HANDOVER.md` with current state:
+Update `$STATE_REPO/HANDOVER.md` with current state:
 
 ```markdown
 ---
@@ -114,9 +102,9 @@ session_summary: "Brief one-liner of what was accomplished"
 ## File locations
 
 - Architecture: `corpus/sources/mik-knowledge-system-architecture.md`
-- Project log: `corpus/sources/mikrub-project-log.md`
+- Project log: `$STATE_REPO/project-log.md`
 - Skills: `.claude/skills/`
-- This handover: `corpus/inbox/HANDOVER.md`
+- This handover: `$STATE_REPO/HANDOVER.md`
 
 ## Commands to verify state
 
@@ -126,12 +114,13 @@ hugo server -D  # local preview
 ```
 ```
 
-### 3. Commit both
+### 4. Commit in state repo
 
 ```bash
-git add corpus/inbox/HANDOVER.md corpus/sources/mikrub-project-log.md
+cd "$STATE_REPO"
+git add HANDOVER.md project-log.md
 git commit -m "handover: [brief description]"
-git push
+# Note: close-session will handle push and merge to main
 ```
 
 ## Anti-patterns
@@ -141,4 +130,3 @@ git push
 - Don't leave handover from weeks ago (overwrite each session)
 - Don't skip the handover "because it's quick" — context loss compounds
 - Don't put bugs or feature backlog here — use `gh issue create` instead (see CLAUDE.md)
-- **Don't overwrite without fetching from main first** — parallel sessions will lose work

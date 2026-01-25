@@ -39,10 +39,20 @@ Scripts source from `.env` in repo root. Required variables:
 
 - `CORPUS_PATH` — Path to corpus directory (e.g., `~/repos/mysite/corpus`)
 - `MAIN_REPO` — Path to main content repo (for close-session)
+- `STATE_REPO` — Path to session state repo (for HANDOVER.md, project-log.md)
 
 Optional:
 - `GMAIL_USER`, `GMAIL_APP_PASSWORD` — For mik-fetch-email
 - `GEMINI_API_KEY` — For mik-describe-images
+
+## Session State Repo
+
+Session state (HANDOVER.md, project-log.md) lives in a separate private git repo configured via `STATE_REPO`. This enables:
+- **Branch-based merge protection** — Each session gets its own branch; git handles conflicts
+- **Privacy** — State files not in public mik-workflow repo
+- **Backup** — Private GitHub repo for cloud sync
+
+The state repo is automatically managed by `start-session` (creates branch) and `close-session` (merges and pushes).
 
 ## Session Workflow
 

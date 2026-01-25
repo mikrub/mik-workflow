@@ -39,8 +39,24 @@ if [ ! -d "$WORKTREE_PATH" ]; then
   exit 1
 fi
 
+# Copy .env from main worktree if it exists
+MAIN_WORKTREE=$(cd "$WORKTREE_PATH" && git worktree list --porcelain | grep "^worktree " | head -1 | sed 's/^worktree //')
+if [ -f "$MAIN_WORKTREE/.env" ]; then
+  cp "$MAIN_WORKTREE/.env" "$WORKTREE_PATH/.env"
+  echo "Copied .env from main worktree"
+  # Source .env to get STATE_REPO
+  source "$WORKTREE_PATH/.env"
+fi
+
+# Create session branch in state repo (for HANDOVER.md merge protection)
+if [ -n "$STATE_REPO" ] && [ -d "$STATE_REPO/.git" ]; then
+  git -C "$STATE_REPO" checkout main 2>/dev/null
+  git -C "$STATE_REPO" checkout -b "session-$SESSION_NAME" 2>/dev/null
+  echo "Created state branch: session-$SESSION_NAME"
+fi
+
 echo ""
-echo "Starting Claude Code in worktree..."
+echo "Starting Claude Code in worktree...
 echo "When you exit claude, run: close-session $SESSION_NAME"
 echo ""
 
