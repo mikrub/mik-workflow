@@ -26,7 +26,17 @@ if [ -z "$SESSION_NAME" ]; then
   echo "Usage: close-session <session-name>"
   echo ""
   echo "Active sessions:"
-  ls -1 "$HOME/.ccswitch/" 2>/dev/null | grep -v "^\." || echo "  (none)"
+  # ccswitch stores worktrees in ~/.ccswitch/worktrees/<repo-name>/
+  if [ -d "$HOME/.ccswitch/worktrees" ]; then
+    find "$HOME/.ccswitch/worktrees" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | while read -r path; do
+      repo=$(basename "$(dirname "$path")")
+      session=$(basename "$path")
+      echo "  $session ($repo)"
+    done
+  else
+    # Fallback to old flat structure
+    ls -1 "$HOME/.ccswitch/" 2>/dev/null | grep -v "^\." || echo "  (none)"
+  fi
   exit 1
 fi
 

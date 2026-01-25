@@ -20,11 +20,19 @@ if [ -z "$SESSION_NAME" ]; then
   exit 1
 fi
 
-# Create worktree via ccswitch (suppress cd and shell integration messages)
-echo "$SESSION_NAME" | command ccswitch create 2>&1 | grep -v -E "^cd |Shell integration|shell-init|source ~/|^$|^To enable|^Then reload"
+# Create worktree via ccswitch and capture output
+CCSWITCH_OUTPUT=$(echo "$SESSION_NAME" | command ccswitch create 2>&1)
 
-# Worktree path - ccswitch uses flat structure: ~/.ccswitch/<session-name>
-WORKTREE_PATH="$HOME/.ccswitch/$SESSION_NAME"
+# Show filtered output to user
+echo "$CCSWITCH_OUTPUT" | grep -v -E "^cd |Shell integration|shell-init|source ~/|^$|^To enable|^Then reload"
+
+# Extract worktree path from ccswitch output (looks for "Location: ~/.ccswitch/...")
+WORKTREE_PATH=$(echo "$CCSWITCH_OUTPUT" | grep "^Location:" | sed 's/^Location: //' | sed "s|^~|$HOME|")
+
+# Fallback: try the old flat structure if parsing failed
+if [ -z "$WORKTREE_PATH" ]; then
+  WORKTREE_PATH="$HOME/.ccswitch/$SESSION_NAME"
+fi
 
 if [ ! -d "$WORKTREE_PATH" ]; then
   echo "Error: Worktree not created at $WORKTREE_PATH"
