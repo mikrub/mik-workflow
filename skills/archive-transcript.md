@@ -7,7 +7,9 @@ permalink: skills/archive-transcript
 
 # Archive transcript
 
-Save the full chat transcript to the corpus for semantic search via Khoj. Captures reasoning, decisions, tool usage, and full context.
+Save the full chat transcript to the corpus for semantic search. Captures reasoning, decisions, tool usage, and full context.
+
+**Important:** Transcripts go to `mikrub.com/corpus/transcripts/` (the content repo), NOT to mik-workflow or mik-workflow-state. The content repo is where Basic-Memory indexes from.
 
 ## Environment detection
 
@@ -71,13 +73,14 @@ fi
 ### 2. Copy transcript to corpus
 
 ```bash
-# Copy to corpus/transcripts/
-cp "$TRANSCRIPT" corpus/transcripts/$(date +%Y-%m-%d)-{slug}.jsonl
+# Copy to mikrub.com corpus (where Basic-Memory indexes)
+CORPUS_TRANSCRIPTS="$HOME/Library/CloudStorage/Dropbox/repos/mikrub.com/corpus/transcripts"
+cp "$TRANSCRIPT" "$CORPUS_TRANSCRIPTS/$(date +%Y-%m-%d)-{slug}.jsonl"
 ```
 
 ### 3. Create markdown wrapper
 
-Create `corpus/transcripts/{date}-{slug}.md`:
+Create `mikrub.com/corpus/transcripts/{date}-{slug}.md`:
 
 ```markdown
 ---
@@ -110,9 +113,10 @@ tags:
 See: `{date}-{slug}.jsonl`
 ```
 
-### 4. Commit
+### 4. Commit in mikrub.com repo
 
 ```bash
+cd ~/Library/CloudStorage/Dropbox/repos/mikrub.com
 git add corpus/transcripts/
 git commit -m "transcript: {brief session description}"
 git push
