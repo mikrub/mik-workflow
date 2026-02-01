@@ -74,6 +74,16 @@ Skills are procedural workflows invoked with `/skill-name`:
 | `/update-draft` | Incorporate research into article drafts |
 | `/resolve-merge` | Resolve git merge conflicts semantically |
 
+## Basic-Memory Sync
+
+`sync-memory` syncs local corpus to cloud. See `mikrub.com/corpus/sources/mik-knowledge-system-architecture.md` for full architecture.
+
+```bash
+sync-memory           # Daily bidirectional sync
+sync-memory --check   # Verify sync status
+sync-memory --resync  # Reset baseline (first run)
+```
+
 ## Dependencies
 
 - [ccswitch](https://github.com/ksred/ccswitch) — Git worktree session management

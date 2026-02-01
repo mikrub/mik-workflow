@@ -9,42 +9,73 @@
 #   sync-memory           # Bidirectional sync
 #   sync-memory --resync  # First run or reset baseline
 #   sync-memory --check   # Verify sync status without transferring
+#   sync-memory --login   # Interactive login (opens browser)
+#
+# For cron: run --login once interactively, then cron can run without browser.
+# Tokens persist in ~/.basic-memory/basic-memory-cloud.json
+# If tokens expire, cron job will fail and notify (no silent browser popup).
 #
 # Requires: Basic-Memory cloud account (basicmemory.com)
 #
 
 set -euo pipefail
 
-BM="uvx basic-memory"
-LOGGED_IN=false
-
-cleanup() {
-    if $LOGGED_IN; then
-        $BM cloud logout >/dev/null 2>&1 || true
-    fi
-}
-trap cleanup EXIT
-
 PROJECT="mikrub-corpus"
 BISYNC_STATE="$HOME/.basic-memory/bisync-state/$PROJECT"
 
-if [[ "${1:-}" == "--check" ]]; then
-    echo "Checking sync status..."
-    $BM cloud login
-    LOGGED_IN=true
-    $BM project check --name "$PROJECT"
+# Check if running interactively (has TTY)
+is_interactive() {
+    [[ -t 0 ]]
+}
+
+# Check if cloud mode is enabled
+is_logged_in() {
+    local status_output
+    status_output=$(uvx basic-memory cloud status 2>/dev/null || true)
+    echo "$status_output" | grep -q "Mode: Cloud"
+}
+
+# Ensure cloud mode is enabled
+ensure_logged_in() {
+    if is_logged_in; then
+        return 0
+    fi
+
+    if is_interactive; then
+        echo "Cloud mode not enabled. Running login..."
+        uvx basic-memory cloud login
+    else
+        echo "ERROR: Cloud mode not enabled and running non-interactively."
+        echo "Run 'sync-memory --login' manually to re-authenticate."
+        exit 1
+    fi
+}
+
+# Interactive login (for first-time setup or re-auth)
+if [[ "${1:-}" == "--login" ]]; then
+    echo "Interactive login (opens browser)..."
+    uvx basic-memory cloud login
+    echo "Done. Cloud mode now enabled for future syncs."
     exit 0
 fi
 
+# Check sync status
+if [[ "${1:-}" == "--check" ]]; then
+    echo "Checking sync status..."
+    ensure_logged_in
+    uvx basic-memory project check --name "$PROJECT"
+    exit 0
+fi
+
+# Main sync
 echo "Syncing to Basic-Memory cloud..."
-$BM cloud login
-LOGGED_IN=true
+ensure_logged_in
 
 # First run needs --resync to establish baseline
 if [[ "${1:-}" == "--resync" ]] || [[ ! -d "$BISYNC_STATE" ]]; then
     echo "Establishing sync baseline (first run or resync requested)..."
-    $BM project bisync --name "$PROJECT" --resync
+    uvx basic-memory project bisync --name "$PROJECT" --resync
 else
-    $BM project bisync --name "$PROJECT"
+    uvx basic-memory project bisync --name "$PROJECT"
 fi
 echo "Done."
